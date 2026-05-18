@@ -1,8 +1,14 @@
 # convexity-lab
 
-Black-Scholes-Merton option analytics with all first- and second-order Greeks
-(including the **Gamma convexity surface**), Monte Carlo validation with
-antithetic variates, and a Newton-Raphson implied vol solver.
+Option pricing toolkit with two complementary models:
+
+- **Black-Scholes-Merton (constant vol)** — closed-form pricing, all first
+  and second-order Greeks (including the **Gamma convexity surface**),
+  Monte Carlo validation with antithetic variates, implied vol solver
+  (Newton-Raphson + Brent fallback).
+- **Heston stochastic volatility** — closed-form pricing via Fourier
+  inversion of the characteristic function (with the *little Heston trap*
+  to avoid branch cuts), implied vol smile generation.
 
 Optional live spot via [yfinance](https://github.com/ranaroussi/yfinance).
 
@@ -30,11 +36,18 @@ the script falls back to synthetic data if it can't fetch live prices).
 
 ## Run
 
+Black-Scholes-Merton demo:
 ```bash
 python stock_convexity.py                  # synthetic demo (no internet needed)
 python stock_convexity.py NVDA             # live spot via yfinance
 python stock_convexity.py NVDA --plot      # also save the gamma surface PNG
 python stock_convexity.py --paths 1000000  # heavier Monte Carlo
+```
+
+Heston stochastic volatility demo:
+```bash
+python heston.py                           # print ATM Heston price + IV smile summary
+python heston.py --plot                    # save heston_smile.png
 ```
 
 Example output (NVDA spot pulled live):
@@ -79,7 +92,7 @@ exploding as expiration approaches).
 
 All formulas follow Hull, *Options, Futures, and Other Derivatives*, 11e.
 
-**Pricing** (European call):
+**BSM pricing** (European call):
 
 > `C = S · e^{-qT} · N(d₁) - K · e^{-rT} · N(d₂)`
 
@@ -99,16 +112,54 @@ where
 
 > `Vanna = -e^{-qT} · φ(d₁) · d₂ / σ`
 
+### Heston model
+
+The Heston SDE is
+
+> `dS_t = (r-q) S_t dt + √v_t · S_t · dW_t¹`
+>
+> `dv_t = κ(θ - v_t) dt + σ_v · √v_t · dW_t²`
+>
+> `d⟨W¹,W²⟩_t = ρ dt`
+
+Five parameters: `v₀` (initial variance), `κ` (mean-reversion speed),
+`θ` (long-run variance), `σ_v` (vol-of-vol), `ρ` (asset-vol correlation).
+With `ρ < 0` and `σ_v > 0`, the model produces the **negative skew** observed
+in equity index options (OTM puts more expensive than OTM calls).
+
+Pricing uses Fourier inversion of two characteristic functions:
+
+> `C = S · e^{-qT} · P₁ - K · e^{-rT} · P₂`,
+>
+> `P_j = ½ + (1/π) ∫₀^∞ Re[ e^{-i u ln K} · f_j(u) / (i u) ] du`
+
+The "little trap" form (Albrecher et al. 2007) keeps `g = (b - iρσu - d)/(b - iρσu + d)`
+and uses `exp(-dT)` inside the log, eliminating the branch-cut discontinuity
+present in the original Heston (1993) formulation.
+
+Sanity check: as `σ_v → 0` with `v₀ = θ`, the Heston price degenerates to
+BSM with `σ = √θ` — verified by the test suite.
+
 ## Validation
 
-The script self-validates in three ways:
+The test suite (`pytest tests/`) covers **21 tests**:
 
-1. **Put-call parity** — `C - P` is compared against `S·e^{-qT} - K·e^{-rT}`.
-   Residual should be at machine precision.
-2. **Monte Carlo** — closed-form price vs MC with antithetic variates. Should
-   match within 2 standard errors (~95% confidence) for 200k paths.
-3. **Implied vol round-trip** — invert the closed-form price back through
-   Newton-Raphson and confirm we recover the original σ to ~1e-8.
+**BSM (14 tests):**
+1. Hull textbook reference values (example 15.6) matched to `1e-3`
+2. Put-call parity at machine precision (`< 1e-12`)
+3. Gamma identical for call & put with same params (model property)
+4. Gamma always positive (long convexity)
+5. Deep-ITM call Δ → 1, deep-OTM call Δ → 0 (boundary behavior)
+6. Monte Carlo matches closed-form within 4 standard errors
+7. Antithetic variates produce strictly lower SE than plain MC
+8. Implied vol round-trip exact to `1e-6` across σ ∈ [0.10, 0.90]
+
+**Heston (7 tests):**
+9. Heston with `σ_v ≈ 0` and `v₀ = θ` degenerates to BSM (parametrized at 3 vols)
+10. Put-call parity holds (model-free property)
+11. Negative correlation produces negative skew (OTM put IV > OTM call IV)
+12. Zero correlation produces approximately symmetric smile
+13. Feller condition flag (`2κθ > σ_v²`) correctly identifies regimes
 
 ## Limitations
 

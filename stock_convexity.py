@@ -172,13 +172,17 @@ def implied_vol(market_price: float, S: float, K: float, T: float, r: float,
                 tol: float = 1e-8, max_iter: int = 100) -> float | None:
     """Invert Black-Scholes for sigma given an observed market price.
 
-    Newton-Raphson with vega as derivative. Seed from Brenner-Subrahmanyam
-    (1988): a closed-form approximation accurate near ATM.
+    Two-stage solver:
+      1. Newton-Raphson seeded by Brenner-Subrahmanyam (1988) approximation -
+         quadratic convergence near ATM where vega is large.
+      2. Brent's method on [1e-6, 5.0] as a bracketing fallback for deep-wing
+         strikes where vega is tiny and Newton diverges.
 
-    Returns None if no convergence.
+    Returns None only if both methods fail (e.g., arbitrage-violating input).
     """
     sigma = sqrt(2 * pi / T) * market_price / S
     sigma = max(min(sigma, 5.0), 1e-4)
+
     for _ in range(max_iter):
         opt = Option(S, K, T, r, sigma, q, kind)
         diff = market_price - opt.price()
@@ -186,11 +190,22 @@ def implied_vol(market_price: float, S: float, K: float, T: float, r: float,
             return sigma
         v = opt.vega()
         if v < 1e-12:
-            return None
-        sigma += diff / v
-        if sigma <= 0:
-            sigma = 1e-4
-    return None
+            break
+        sigma_new = sigma + diff / v
+        if sigma_new <= 0 or sigma_new > 10:
+            break
+        sigma = sigma_new
+
+    # Brent fallback (bracketing - works where Newton fails)
+    from scipy.optimize import brentq
+
+    def _residual(s: float) -> float:
+        return Option(S, K, T, r, s, q, kind).price() - market_price
+
+    try:
+        return float(brentq(_residual, 1e-6, 5.0, xtol=tol, maxiter=200))
+    except (ValueError, RuntimeError):
+        return None
 
 
 # ============================================================================
