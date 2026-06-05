@@ -1,6 +1,6 @@
 # convexity-lab
 
-Option pricing toolkit with two complementary models:
+Option pricing toolkit with three complementary models:
 
 - **Black-Scholes-Merton (constant vol)** — closed-form pricing, all first
   and second-order Greeks (including the **Gamma convexity surface**),
@@ -9,6 +9,9 @@ Option pricing toolkit with two complementary models:
 - **Heston stochastic volatility** — closed-form pricing via Fourier
   inversion of the characteristic function (with the *little Heston trap*
   to avoid branch cuts), implied vol smile generation.
+- **American options via CRR binomial tree** — early exercise for calls
+  and puts, discrete cash dividends via the Escrowed Dividend method,
+  convergence to BSM in the European limit.
 
 Optional live spot via [yfinance](https://github.com/ranaroussi/yfinance).
 
@@ -50,43 +53,39 @@ python heston.py                           # print ATM Heston price + IV smile s
 python heston.py --plot                    # save heston_smile.png
 ```
 
-Example output (NVDA spot pulled live):
+American options — CRR binomial tree:
+```python
+from american import AmericanOption
 
-```
-============================================================================
- Black-Scholes-Merton analytics + convexity surface
-============================================================================
-
-[+] live spot from yfinance  (NVDA)  spot = $920.00
-
-  Option contract: S=920.00  K=966.00  T=0.1644y  r=0.045  sigma=0.500  kind=call
-  ------------------------------------------------------------
-    Price                  56.421234
-    Delta                   0.473219
-    Gamma                   0.003912    <-- convexity in spot
-    Vega                  146.882443
-    Theta (annual)       -284.114502
-    Rho                    61.224578
-    Vanna                   0.024195    <-- delta vs vol
-    Volga (vomma)          16.348822    <-- convexity in vol
-
-  Monte Carlo (antithetic, n_paths = 200,000):
-    MC price        = 56.428901  +- 0.064721  (95% CI)
-    BSM closed-form = 56.421234
-    abs residual    = 0.007667
-    elapsed         = 28.4 ms
-
-  Put-call parity check (residual should be ~1e-14):
-    C - P                        =   -39.5234567890
-    S e^{-qT} - K e^{-rT}        =   -39.5234567890
-    residual                     =     0.0000000000
-
-  Implied vol round-trip:  input = 0.500000   recovered = 0.500000
+# ATM American put — 1 year, 20% vol, 5% rate
+opt = AmericanOption(S=100, K=100, T=1.0, r=0.05, sigma=0.20, n=200, kind="put")
+print(f"American put  : {opt.price():.4f}")
+print(f"Early premium : {opt.early_exercise_premium():.4f}")
 ```
 
-With `--plot`, you also get a 3D surface of Gamma over the (moneyness × time)
-grid — visually showing where convexity is concentrated (peaked at-the-money,
-exploding as expiration approaches).
+Discrete dividends — Escrowed Dividend method:
+```python
+from american import DiscreteDividendOption
+
+# PETR4: R$1.22 dividend in ~1 month, Selic 10.65%
+opt = DiscreteDividendOption(
+    S=40.76, K=41.0, T=0.25, r=0.1065, sigma=0.35,
+    dividends=((0.083, 1.22),),   # (ex-date in years, cash amount)
+    n=300, kind="put"
+)
+result = opt.vs_continuous()
+print(f"Discrete price    : R$ {result['discrete_price']:.4f}")
+print(f"Continuous approx : R$ {result['continuous_price']:.4f}  (q={result['q_approx']:.2%})")
+print(f"Difference        : {result['difference_pct']:+.2f}%")
+# Output:
+# Discrete price    : R$ 3.1027
+# Continuous approx : R$ 2.9664  (q=11.97%)
+# Difference        : +4.59%
+```
+
+With Brazilian high-dividend stocks (PETR4, VALE3, banks), the continuous
+yield approximation **underprices puts by ~4-5%** — a model error that
+discrete dividends correctly captures.
 
 ## Math
 
@@ -140,36 +139,77 @@ present in the original Heston (1993) formulation.
 Sanity check: as `σ_v → 0` with `v₀ = θ`, the Heston price degenerates to
 BSM with `σ = √θ` — verified by the test suite.
 
+### American options — CRR binomial tree
+
+The Cox-Ross-Rubinstein (1979) parameterisation of the recombining tree:
+
+> `u = exp(σ√dt)`,  `d = 1/u`,  `p = (exp((r−q)dt) − d) / (u − d)`
+
+At each interior node the holder compares continuation value against
+immediate exercise and takes the maximum:
+
+> `V(i,j) = max( e^{-r·dt} · [p·V(i+1,j+1) + (1−p)·V(i+1,j)] , intrinsic )`
+
+### Discrete dividends — Escrowed Dividend method
+
+The recombining tree is built on the *pure stochastic component* of the stock:
+
+> `S* = S − PV(dividends)` where `PV = Σ Dᵢ · e^{-r·tᵢ}`
+
+At each node, the PV of dividends not yet paid is added back to recover
+the full stock price for intrinsic value calculations. This preserves
+tree recombination — superior to the naive approach of subtracting each
+dividend at the ex-date, which breaks recombination and misprices vol.
+
 ## Validation
 
-The test suite (`pytest tests/`) covers **21 tests**:
+The test suite (`pytest tests/`) covers **45 tests**:
 
 **BSM (14 tests):**
 1. Hull textbook reference values (example 15.6) matched to `1e-3`
 2. Put-call parity at machine precision (`< 1e-12`)
-3. Gamma identical for call & put with same params (model property)
+3. Gamma identical for call & put with same params
 4. Gamma always positive (long convexity)
-5. Deep-ITM call Δ → 1, deep-OTM call Δ → 0 (boundary behavior)
+5. Deep-ITM call Δ → 1, deep-OTM call Δ → 0
 6. Monte Carlo matches closed-form within 4 standard errors
 7. Antithetic variates produce strictly lower SE than plain MC
 8. Implied vol round-trip exact to `1e-6` across σ ∈ [0.10, 0.90]
 
 **Heston (7 tests):**
-9. Heston with `σ_v ≈ 0` and `v₀ = θ` degenerates to BSM (parametrized at 3 vols)
-10. Put-call parity holds (model-free property)
-11. Negative correlation produces negative skew (OTM put IV > OTM call IV)
-12. Zero correlation produces approximately symmetric smile
-13. Feller condition flag (`2κθ > σ_v²`) correctly identifies regimes
+9. Heston degenerates to BSM when `σ_v → 0` (3 vol levels)
+10. Put-call parity holds
+11. Negative ρ produces negative skew
+12. Zero ρ produces symmetric smile
+13. Feller condition flag correct
+
+**American / CRR binomial tree (14 tests):**
+14. American put ≥ European put
+15. American call = European call when `q = 0`
+16. American call > European call when `q > 0`
+17. American put > BSM European put (ATM)
+18. Deep-ITM put: early exercise premium > 0
+19. European binomial converges to BSM within 0.5% at `n = 1000`
+20–25. Early exercise premium ≥ 0 across param grid (calls + puts)
+26. American put decreasing in `r`
+27. American put increasing in `σ`
+
+**Discrete dividends — Escrowed Dividend (10 tests):**
+28. No dividends → same price as plain AmericanOption
+29. Dividend increases put value
+30. Dividend decreases call value
+31. American ≥ European with discrete dividends
+32. Large imminent dividend makes call early exercise optimal
+33. Dividend after expiry has no effect on price
+34. `vs_continuous` returns valid dict with positive prices
+35–36. More dividends → higher put, lower call (monotone)
+37. `ValueError` raised when PV(dividends) ≥ spot
 
 ## Limitations
 
-- European exercise only (no early exercise / American options).
-- Constant volatility (no local-vol, stochastic vol, or jumps).
-- Constant dividend yield (continuous, not discrete dividends).
+- ~~European exercise only~~ ✅ American options added via CRR binomial tree.
+- ~~Constant dividend yield~~ ✅ Discrete dividends added via Escrowed Dividend method.
+- Constant volatility (no local-vol or jumps — Heston covers stochastic vol).
 - Risk-free rate is flat (no term structure).
-
-For exotic payoffs, stochastic vol (Heston), or American exercise, this
-needs binomial / PDE / LSM Monte Carlo extensions.
 
 ## License
 
