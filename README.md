@@ -1,6 +1,6 @@
 # convexity-lab
 
-Option pricing toolkit with two complementary models:
+Option pricing toolkit with three complementary models:
 
 - **Black-Scholes-Merton (constant vol)** — closed-form pricing, all first
   and second-order Greeks (including the **Gamma convexity surface**),
@@ -9,6 +9,9 @@ Option pricing toolkit with two complementary models:
 - **Heston stochastic volatility** — closed-form pricing via Fourier
   inversion of the characteristic function (with the *little Heston trap*
   to avoid branch cuts), implied vol smile generation.
+- **American options via CRR binomial tree** — early exercise for calls
+  and puts, convergence to BSM in the European limit, early exercise
+  premium quantification.
 
 Optional live spot via [yfinance](https://github.com/ranaroussi/yfinance).
 
@@ -50,6 +53,20 @@ python heston.py                           # print ATM Heston price + IV smile s
 python heston.py --plot                    # save heston_smile.png
 ```
 
+American options (CRR binomial tree):
+```python
+from american import AmericanOption
+
+# ATM American put — 1 year, 20% vol, 5% rate
+opt = AmericanOption(S=100, K=100, T=1.0, r=0.05, sigma=0.20, n=200, kind="put")
+print(f"American put  : {opt.price():.4f}")
+print(f"Early premium : {opt.early_exercise_premium():.4f}")
+
+# American call with dividend yield — early exercise becomes optimal
+call = AmericanOption(S=100, K=100, T=1.0, r=0.05, sigma=0.20, q=0.08, kind="call")
+print(f"American call : {call.price():.4f}")
+```
+
 Example output (NVDA spot pulled live):
 
 ```
@@ -83,10 +100,6 @@ Example output (NVDA spot pulled live):
 
   Implied vol round-trip:  input = 0.500000   recovered = 0.500000
 ```
-
-With `--plot`, you also get a 3D surface of Gamma over the (moneyness × time)
-grid — visually showing where convexity is concentrated (peaked at-the-money,
-exploding as expiration approaches).
 
 ## Math
 
@@ -140,9 +153,26 @@ present in the original Heston (1993) formulation.
 Sanity check: as `σ_v → 0` with `v₀ = θ`, the Heston price degenerates to
 BSM with `σ = √θ` — verified by the test suite.
 
+### American options — CRR binomial tree
+
+The Cox-Ross-Rubinstein (1979) parameterisation of the recombining tree:
+
+> `u = exp(σ√dt)`,  `d = 1/u`,  `p = (exp((r−q)dt) − d) / (u − d)`
+
+At each interior node the holder compares continuation value against
+immediate exercise and takes the maximum:
+
+> `V(i,j) = max( e^{-r·dt} · [p·V(i+1,j+1) + (1−p)·V(i+1,j)] , intrinsic )`
+
+Key properties verified by the test suite:
+- American ≥ European always (early exercise right has non-negative value)
+- American call = European call when `q = 0` (never optimal to exercise early)
+- American call > European call when `q > 0` (dividends make early exercise possible)
+- European binomial converges to BSM within 0.5% at `n = 1000`
+
 ## Validation
 
-The test suite (`pytest tests/`) covers **21 tests**:
+The test suite (`pytest tests/`) covers **35 tests**:
 
 **BSM (14 tests):**
 1. Hull textbook reference values (example 15.6) matched to `1e-3`
@@ -161,15 +191,26 @@ The test suite (`pytest tests/`) covers **21 tests**:
 12. Zero correlation produces approximately symmetric smile
 13. Feller condition flag (`2κθ > σ_v²`) correctly identifies regimes
 
+**American / CRR binomial tree (14 tests):**
+14. American put ≥ European put (early exercise premium ≥ 0)
+15. American call = European call when `q = 0`
+16. American call > European call when `q > 0`
+17. American put > BSM European put (ATM)
+18. Deep-ITM put: early exercise premium meaningfully positive
+19. European binomial converges to BSM within 0.5% at `n = 1000`
+20–25. Early exercise premium ≥ 0 across param grid (calls + puts)
+26. American put decreasing in `r`
+27. American put increasing in `σ`
+
 ## Limitations
 
-- European exercise only (no early exercise / American options).
-- Constant volatility (no local-vol, stochastic vol, or jumps).
+- ~~European exercise only~~ ✅ American options added via CRR binomial tree.
+- Constant volatility (no local-vol or jumps — Heston covers stochastic vol).
 - Constant dividend yield (continuous, not discrete dividends).
 - Risk-free rate is flat (no term structure).
 
-For exotic payoffs, stochastic vol (Heston), or American exercise, this
-needs binomial / PDE / LSM Monte Carlo extensions.
+For discrete dividends, LSM Monte Carlo, or local vol (Dupire), further
+extensions are planned.
 
 ## License
 
